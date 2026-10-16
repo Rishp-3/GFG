@@ -37,6 +37,7 @@ STATE_PATH = ".gfg-sync/state.json"
 DIFFICULTY_ORDER = ["school", "basic", "easy", "medium", "hard"]
 SKIP_TOP_DIRS = {"docs", "scripts", "tests", "node_modules"}
 MAX_RETRIES = 5
+SENSITIVE_HEADERS = {"cookie", "authorization"}
 EXTENSIONS = {
     "java": "java", "cpp": "cpp", "c++": "cpp", "c": "c", "python": "py",
     "python3": "py", "javascript": "js", "typescript": "ts", "csharp": "cs",
@@ -76,11 +77,32 @@ class ConfigError(SyncError):
 # HTTP layer (tests patch http_request)
 # --------------------------------------------------------------------------
 
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Drop credentials when a redirect leaves the original host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            old_host = urllib.parse.urlsplit(req.full_url).netloc.lower()
+            new_host = urllib.parse.urlsplit(newurl).netloc.lower()
+            if old_host != new_host:
+                for name in list(new.headers):
+                    if name.lower() in SENSITIVE_HEADERS:
+                        del new.headers[name]
+                for name in list(new.unredirected_hdrs):
+                    if name.lower() in SENSITIVE_HEADERS:
+                        del new.unredirected_hdrs[name]
+        return new
+
+
+_OPENER = urllib.request.build_opener(_SafeRedirect)
+
+
 def http_request(url, headers, timeout=60):
     """One HTTP GET. Returns (status, body_bytes). Network errors raise."""
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _OPENER.open(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
         try:
@@ -105,6 +127,7 @@ class Client:
         auth_value = env.get("GFG_AUTH_HEADER_VALUE", "").strip()
         if auth_name and auth_value:
             headers[auth_name] = auth_value
+            SENSITIVE_HEADERS.add(auth_name.lower())
         self._headers = headers
         self._first = True
 
@@ -433,6 +456,7 @@ def normalize(item, cfg):
 
 def list_submissions(client, cfg, last_id, full):
     records = []
+    seen_ids = set()
     page = cfg["page_start"]
     for _ in range(int(cfg["max_pages"])):
         url = cfg["list_url"].replace("{page}", str(page))
@@ -450,10 +474,15 @@ def list_submissions(client, cfg, last_id, full):
         if not items:
             break
         stop = False
+        new_on_page = 0
         for item in items:
             rec = normalize(item, cfg)
             if rec is None:
                 continue
+            if rec["id"] in seen_ids:
+                continue
+            seen_ids.add(rec["id"])
+            new_on_page += 1
             if not full and last_id is not None and reached_last(rec["id"], last_id):
                 if cfg["order"] == "oldest_first":
                     continue
@@ -461,6 +490,10 @@ def list_submissions(client, cfg, last_id, full):
                 break
             records.append(rec)
         if stop:
+            break
+        if new_on_page == 0:
+            # Page repeated what we already saw: the endpoint is probably
+            # ignoring {page}. Stop instead of looping up to max_pages.
             break
         size = cfg.get("page_size")
         if size and len(items) < int(size):
@@ -565,6 +598,10 @@ def esc(text):
     return str(text).replace("|", "\\|").replace("\n", " ")
 
 
+def esc_link(text):
+    return esc(text).replace("[", "\\[").replace("]", "\\]")
+
+
 def render_block(state):
     by_diff = {}
     for slug, p in state["problems"].items():
@@ -584,16 +621,16 @@ def render_block(state):
                 "| ---: | --- | --- | --- | --- |"]
         rows = sorted(by_diff[d], key=lambda sp: (
             sp[1].get("first_epoch") if sp[1].get("first_epoch") is not None else 1e18, sp[0]))
-        for idx, (slug, p) in enumerate(rows, 1):
-            number = p.get("problem_id") or idx
+        for slug, p in rows:
+            number = p.get("problem_id") or "-"
             folder = urllib.parse.quote(p["folder"])
             sol = urllib.parse.quote("%s/%s" % (p["folder"], p["solution"]))
             first = p.get("first_epoch")
             date = (datetime.fromtimestamp(first, timezone.utc).strftime("%Y-%m-%d")
                     if first is not None else "n/a")
             out.append("| %s | [%s](%s/) | %s | [%s](%s) | %s |" % (
-                esc(number), esc(p.get("title") or slug), folder,
-                esc(", ".join(p.get("topics") or [])), esc(p["solution"]), sol, date))
+                esc(number), esc_link(p.get("title") or slug), folder,
+                esc(", ".join(p.get("topics") or [])), esc_link(p["solution"]), sol, date))
         out.append("")
     out.append(END)
     return "\n".join(out)
@@ -676,9 +713,16 @@ def sync(root, env, client=None):
         folder = p.get("folder")
         if not folder or not (root / folder).is_dir():
             folder = find_existing_folder(root, slug)
-        readme_missing = not folder or not (root / folder / "README.md").exists()
+        readme_path = (root / folder / "README.md") if folder else None
+        readme_missing = readme_path is None or not readme_path.exists()
+        readme_is_placeholder = False
+        if not readme_missing:
+            try:
+                readme_is_placeholder = PLACEHOLDER_DESC in readme_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                pass
         details = None
-        if readme_missing or not p.get("title"):
+        if readme_missing or readme_is_placeholder or not p.get("title"):
             details = fetch_problem(client, cfg, slug)
         title = (details or {}).get("title") or list_title or p.get("title") or slug
         difficulty = (details or {}).get("difficulty") or list_diff or p.get("difficulty")
@@ -710,13 +754,23 @@ def sync(root, env, client=None):
         key = list(order_key(newest))
         if prev is None or tuple(key) > tuple(prev) or not (pdir / ("Solution." + ext)).exists():
             write_if_changed(pdir / ("Solution." + ext), newest_code)
+            old = p.get("solution")
+            if old and old != "Solution." + ext and re.fullmatch(r"Solution\.\w+", old):
+                try:
+                    (pdir / old).unlink()
+                except OSError:
+                    pass
             p["latest_key"] = key
             p["solution"] = "Solution." + ext
 
         info = {"title": title, "difficulty": difficulty, "topics": topics}
         desc_md = html_to_md((details or {}).get("description_html"))
-        create_exclusive(pdir / "README.md",
-                         build_problem_readme(slug, info, cfg, desc_md).encode("utf-8"))
+        readme_bytes = build_problem_readme(slug, info, cfg, desc_md).encode("utf-8")
+        if readme_is_placeholder and desc_md:
+            # Only our own auto-generated placeholder is ever replaced.
+            write_if_changed(pdir / "README.md", readme_bytes)
+        else:
+            create_exclusive(pdir / "README.md", readme_bytes)
         if make_stub and ext == "java":
             create_exclusive(pdir / "Main.java", MAIN_STUB.encode("utf-8"))
 
@@ -724,6 +778,9 @@ def sync(root, env, client=None):
                   "folder": folder, "difficulty_dir": folder.split("/")[0],
                   "problem_id": list_pid if list_pid is not None else p.get("problem_id")})
         log("Synced %s (%d new)." % (slug, len(subs)))
+        # Persist progress so a later failure does not lose finished work.
+        # last_submission_id is untouched here, so a re-run is still safe.
+        save_state(root, state)
 
     # Marker for the next incremental run: newest id across every listed item.
     if records:

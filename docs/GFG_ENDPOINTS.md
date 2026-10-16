@@ -4,8 +4,8 @@ Research date: 2026-10-16. GeeksforGeeks has no official API, and the sandbox
 that built this repo cannot reach geeksforgeeks.org, so nothing here was
 tested against the live site.
 
-`docs/gfg-network-sample.md` was **not present** when this was written, so it
-could not be used as the source of truth.
+`docs/gfg-network-sample.md` is now a blank template for you to fill in from
+your own captured request; it is the place to record what you observe.
 
 ## Bottom line
 
@@ -127,3 +127,8 @@ Example (the URLs in it are fake placeholders, not GFG endpoints):
 ```
 
 All JSON paths are dotted (`a.b.0.c`; numbers index into lists).
+
+## Behaviour notes
+
+- Paging stops when a page is empty, shorter than `page_size`, or contains only ids already seen (endpoint ignoring `{page}`).
+- Cookie and auth headers are dropped if a redirect leaves the original host.

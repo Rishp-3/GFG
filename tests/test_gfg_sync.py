@@ -297,6 +297,86 @@ class TestIdempotentAndIncremental(SyncTestCase):
             self.assertTrue((self.root / "Easy" / ("p%d" % i) / "Solution.java").exists())
 
 
+class TestFixes(SyncTestCase):
+    def test_repeated_page_stops_loop(self):
+        self.fake.add(1)
+        orig = self.fake.__call__
+        def always_page_one(url, headers, timeout=60):
+            if url.startswith(LIST):
+                url = LIST + "1"
+            return orig(url, headers, timeout)
+        with mock.patch.object(gfg_sync, "http_request", always_page_one):
+            self.run_sync()
+        self.assertLessEqual(len(self.fake.calls_to(LIST)), 2)
+
+    def test_duplicate_ids_fetched_once(self):
+        self.fake.add(1)
+        self.fake.subs.append(dict(self.fake.subs[0]))
+        self.fake.page_size = 5
+        self.run_sync()
+        self.assertEqual(len(self.fake.calls_to(CODE)), 1)
+
+    def test_placeholder_readme_is_replaced_later(self):
+        self.fake.add(1)
+        self.fake.problems["two-sum"] = 403
+        self.run_sync()
+        readme = self.root / "Easy" / "two-sum" / "README.md"
+        self.assertIn("not available", readme.read_text())
+        self.fake.problems["two-sum"] = {"title": "Two Sum", "difficulty": "Easy",
+                                         "description": "<p>Real text</p>", "tags": []}
+        self.fake.add(2)
+        self.run_sync()
+        self.assertIn("Real text", readme.read_text())
+
+    def test_user_edited_readme_not_replaced(self):
+        self.fake.add(1)
+        self.run_sync()
+        readme = self.root / "Easy" / "two-sum" / "README.md"
+        readme.write_text("mine\n")
+        self.fake.add(2)
+        self.run_sync()
+        self.assertEqual(readme.read_text(), "mine\n")
+
+    def test_stale_solution_file_removed_on_language_change(self):
+        self.fake.add(1, lang="Java")
+        self.run_sync()
+        self.fake.add(2, lang="C++")
+        self.run_sync(GFG_LANGUAGES="java,c++")
+        folder = self.root / "Easy" / "two-sum"
+        self.assertTrue((folder / "Solution.cpp").exists())
+        self.assertFalse((folder / "Solution.java").exists())
+
+    def test_redirect_to_other_host_drops_cookie(self):
+        import urllib.request
+        handler = gfg_sync._SafeRedirect()
+        req = urllib.request.Request("https://a.test/x", headers={"Cookie": "c=1"})
+        new = handler.redirect_request(req, None, 302, "Found", {}, "https://b.test/y")
+        self.assertNotIn("Cookie", dict(new.header_items()))
+        new = handler.redirect_request(req, None, 302, "Found", {}, "https://a.test/z")
+        self.assertIn("Cookie", dict(new.header_items()))
+
+    def test_brackets_in_title_escaped(self):
+        self.fake.add(1, title="Array [Easy]")
+        self.run_sync()
+        self.assertIn("Array \\[Easy\\]", (self.root / "README.md").read_text())
+
+    def test_progress_saved_before_later_failure(self):
+        self.fake.add(1, slug="aaa")
+        self.fake.add(2, slug="bbb")
+        orig = self.fake.__call__
+        def fail_on_bbb(url, headers, timeout=60):
+            if url == CODE + "2":
+                return 500, b""
+            return orig(url, headers, timeout)
+        with mock.patch.object(gfg_sync, "http_request", fail_on_bbb):
+            with self.assertRaises(gfg_sync.SyncError):
+                self.run_sync()
+        state = json.loads((self.root / ".gfg-sync" / "state.json").read_text())
+        self.assertEqual(state["problems"]["aaa"]["ids"], ["1"])
+        self.assertNotIn("bbb", state["problems"])
+        self.assertIsNone(state["last_submission_id"])
+
+
 class TestErrors(SyncTestCase):
     def test_auth_error_is_clear_and_state_not_saved(self):
         self.fake.add(1)
