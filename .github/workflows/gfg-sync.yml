@@ -1,0 +1,73 @@
+name: GFG Sync
+
+on:
+  schedule:
+    - cron: "30 3 * * *" # daily, 03:30 UTC
+  workflow_dispatch:
+    inputs:
+      full_sync:
+        description: "Re-list the whole submission history instead of only new ones"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gfg-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run GFG sync
+        env:
+          GFG_COOKIE_HEADER: ${{ secrets.GFG_COOKIE_HEADER }}
+          GFG_AUTH_HEADER_VALUE: ${{ secrets.GFG_AUTH_HEADER_VALUE }}
+          FULL_SYNC: ${{ inputs.full_sync && 'true' || 'false' }}
+          GFG_LANGUAGES: ${{ vars.GFG_LANGUAGES || 'java' }}
+          REQUEST_DELAY: ${{ vars.REQUEST_DELAY || '1.5' }}
+          CREATE_MAIN_STUB: ${{ vars.CREATE_MAIN_STUB || 'true' }}
+          ARCHIVE_ALL_ACCEPTED: ${{ vars.ARCHIVE_ALL_ACCEPTED || 'true' }}
+        run: python scripts/gfg_sync.py
+
+      - name: Safety check (never touch Main.java)
+        run: |
+          git add -A
+          if git rev-parse --verify HEAD >/dev/null 2>&1; then
+            # --no-renames: a renamed Main.java shows up as a deletion of the old path.
+            bad=$(git diff --no-renames --name-only --diff-filter=MDR HEAD | grep -E '(^|/)Main\.java$' || true)
+            if [ -n "$bad" ]; then
+              echo "::error::Main.java was modified, deleted or renamed. Refusing to commit:"
+              echo "$bad"
+              exit 1
+            fi
+          fi
+
+      - name: Commit and push
+        env:
+          # Change these two lines to set the commit author.
+          COMMIT_AUTHOR_NAME: "gfg-sync[bot]"
+          COMMIT_AUTHOR_EMAIL: "gfg-sync@users.noreply.github.com"
+        run: |
+          git config user.name "$COMMIT_AUTHOR_NAME"
+          git config user.email "$COMMIT_AUTHOR_EMAIL"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes, nothing to commit."
+          else
+            git commit -m "Sync accepted GFG submissions"
+            git push
+          fi
