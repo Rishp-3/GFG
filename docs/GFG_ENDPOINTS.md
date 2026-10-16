@@ -7,6 +7,14 @@ tested against the live site.
 `docs/gfg-network-sample.md` is now a blank template for you to fill in from
 your own captured request; it is the place to record what you observe.
 
+## Update (2026-10-16): endpoints now captured
+
+The three requests the script uses were captured from the logged-in website
+and are recorded in `docs/gfg-network-sample.md`. `.gfg-sync/endpoints.json`
+is filled in with them. Everything below describes the earlier, generic
+situation and the config format; the "unverified" rows for list/code endpoints
+are now resolved, but pagination and a description endpoint remain unverified.
+
 ## Bottom line
 
 **I could not verify any endpoint that lists a logged-in user's past

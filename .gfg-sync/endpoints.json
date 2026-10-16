@@ -1,0 +1,33 @@
+{
+  "_comment": "Captured from the logged-in GFG website. No secrets here: the cookie goes in the GFG_COOKIE_HEADER GitHub secret.",
+  "profile_url": "https://practiceapi.geeksforgeeks.org/api/v1/user/problems/submissions/",
+  "profile_method": "POST",
+  "profile_body": {"handle": "rishp_3", "requestType": "", "year": "", "month": ""},
+  "profile_items_path": "result",
+  "problem_list_url": "https://practiceapi.geeksforgeeks.org/api/latest/problems/{slug}/submissions/user/?",
+  "items_path": "results.submissions",
+  "fields": {
+    "id": "submission_id",
+    "problem_slug": "_slug",
+    "problem_title": "_title",
+    "difficulty": "_difficulty",
+    "problem_id": "_problem_id",
+    "language": "lang",
+    "timestamp": "subtime"
+  },
+  "timestamp_utc_offset_minutes": 330,
+  "accepted_field": "exec_status_text",
+  "accepted_values": ["correct"],
+  "code_url": "https://practiceapi.geeksforgeeks.org/api/latest/problems/submissions/{id}/?",
+  "code_format": "json",
+  "code_path": "user_code",
+  "code_html_unescape": false,
+  "problem_page_url": "https://www.geeksforgeeks.org/problems/{slug}/1",
+  "headers": {
+    "Origin": "https://www.geeksforgeeks.org",
+    "Referer": "https://www.geeksforgeeks.org/",
+    "Accept": "application/json, */*",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+  },
+  "auth_header_name": ""
+}

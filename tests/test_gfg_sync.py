@@ -444,3 +444,75 @@ class TestHtmlToMd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeReal:
+    """Mimics the real GFG responses captured from the website."""
+
+    def __init__(self):
+        self.calls = []
+        self.posts = []
+
+    def __call__(self, url, headers, timeout=60, data=None):
+        self.calls.append(url)
+        if url.endswith("/api/v1/user/problems/submissions/"):
+            self.posts.append((json.loads(data), headers.get("Content-Type")))
+            return 200, json.dumps({"status": "success", "count": 2, "message": "", "result": {
+                "Medium": {"700292": {"slug": "generate-ip-addresses", "pname": "Generate IP Addresses",
+                                      "lang": "java", "user_subtime": "2026-03-13 23:33:32"}},
+                "Easy": {"700889": {"slug": "reverse-an-array", "pname": "Reverse Array",
+                                    "lang": "java", "user_subtime": "2025-12-12 02:44:26"}},
+            }}).encode()
+        if url.endswith("/problems/generate-ip-addresses/submissions/user/?"):
+            return 200, json.dumps({"results": {"id": 700292, "slug": "generate-ip-addresses", "submissions": [
+                {"submission_id": "e3fdb457-9d71", "exec_status_text": "Correct", "lang": "java",
+                 "subtime": "2026-03-13 23:33:32", "pid": "700292"},
+                {"submission_id": "wrong-1", "exec_status_text": "Incorrect", "lang": "java",
+                 "subtime": "2026-03-13 23:00:00", "pid": "700292"}]}}).encode()
+        if url.endswith("/problems/reverse-an-array/submissions/user/?"):
+            return 404, b""
+        if url.endswith("/problems/submissions/e3fdb457-9d71/?"):
+            return 200, json.dumps({"code": "", "status": "1", "language": "java",
+                                    "user_code": "import java.util.*;\n\nclass Solution {}\n"}).encode()
+        return 500, b""
+
+
+class TestRealShape(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / ".gfg-sync").mkdir()
+        real = Path(__file__).resolve().parent.parent / ".gfg-sync" / "endpoints.json"
+        (self.root / ".gfg-sync" / "endpoints.json").write_text(real.read_text())
+        self.fake = FakeReal()
+        for target, new in ((gfg_sync, self.fake),):
+            patcher = mock.patch.object(target, "http_request", new)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        sleeper = mock.patch.object(gfg_sync.time, "sleep")
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
+
+    def run_sync(self):
+        return gfg_sync.sync(self.root, {"REQUEST_DELAY": "0", "GFG_COOKIE_HEADER": "c=1"})
+
+    def test_two_stage_flow_writes_solution(self):
+        self.run_sync()
+        sol = self.root / "Medium" / "generate-ip-addresses" / "Solution.java"
+        self.assertEqual(sol.read_text(), "import java.util.*;\n\nclass Solution {}\n")
+        self.assertTrue((self.root / "Medium" / "generate-ip-addresses" / "Main.java").exists())
+        self.assertFalse((self.root / "Easy" / "reverse-an-array").exists())  # 404 skipped
+        self.assertEqual(self.fake.posts[0][0]["handle"], "rishp_3")
+        self.assertEqual(self.fake.posts[0][1], "application/json")
+        self.assertIn("20260313T180332Z", "".join(
+            p.name for p in (self.root / "Medium" / "generate-ip-addresses" / "submissions").iterdir()))
+        readme = (self.root / "README.md").read_text()
+        self.assertIn("Generate IP Addresses", readme)
+
+    def test_second_run_fetches_no_code_again(self):
+        self.run_sync()
+        before = len([c for c in self.fake.calls if "/submissions/e3fdb457" in c])
+        self.run_sync()
+        after = len([c for c in self.fake.calls if "/submissions/e3fdb457" in c])
+        self.assertEqual(before, after)

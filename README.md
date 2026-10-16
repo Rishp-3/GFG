@@ -4,7 +4,7 @@ My accepted GeeksforGeeks (GFG) solutions, synced automatically by a scheduled
 GitHub Actions workflow (`.github/workflows/gfg-sync.yml` runs
 `scripts/gfg_sync.py`). Python standard library only.
 
-- Setup steps: see [SETUP.md](SETUP.md)
+- Setup steps (only the cookie secret is left to add): see [SETUP.md](SETUP.md)
 - What is verified and what is not about GFG's endpoints: see
   [docs/GFG_ENDPOINTS.md](docs/GFG_ENDPOINTS.md)
 

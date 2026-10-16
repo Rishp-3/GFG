@@ -68,8 +68,8 @@ jobs:
       - name: Commit and push
         env:
           # Change these two lines to set the commit author.
-          COMMIT_AUTHOR_NAME: "gfg-sync[bot]"
-          COMMIT_AUTHOR_EMAIL: "gfg-sync@users.noreply.github.com"
+          COMMIT_AUTHOR_NAME: "Rishabh"
+          COMMIT_AUTHOR_EMAIL: "174471886+Rishp-3@users.noreply.github.com"
         run: |
           git config user.name "$COMMIT_AUTHOR_NAME"
           git config user.email "$COMMIT_AUTHOR_EMAIL"

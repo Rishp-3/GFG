@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -98,9 +98,12 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_SafeRedirect)
 
 
-def http_request(url, headers, timeout=60):
-    """One HTTP GET. Returns (status, body_bytes). Network errors raise."""
-    req = urllib.request.Request(url, headers=headers)
+def http_request(url, headers, timeout=60, data=None):
+    """One HTTP request (GET, or POST when ``data`` bytes are given).
+
+    Returns (status, body_bytes). Network errors raise.
+    """
+    req = urllib.request.Request(url, data=data, headers=headers)
     try:
         with _OPENER.open(req, timeout=timeout) as resp:
             return resp.status, resp.read()
@@ -131,8 +134,9 @@ class Client:
         self._headers = headers
         self._first = True
 
-    def get(self, url, soft=()):
-        """GET with polite delay, retry/backoff. Returns (status, body).
+    def get(self, url, soft=(), body=None):
+        """GET (or JSON POST when ``body`` is a dict) with polite delay and
+        retry/backoff. Returns (status, body).
 
         Statuses listed in ``soft`` are returned instead of raised.
         """
@@ -141,13 +145,19 @@ class Client:
                 time.sleep(self.delay)
             self._first = False
             try:
-                status, body = http_request(url, self._headers)
+                if body is None:
+                    status, resp = http_request(url, self._headers)
+                else:
+                    hdrs = dict(self._headers)
+                    hdrs["Content-Type"] = "application/json"
+                    status, resp = http_request(
+                        url, hdrs, data=json.dumps(body).encode("utf-8"))
             except (urllib.error.URLError, TimeoutError, OSError):
-                status, body = 0, b""
+                status, resp = 0, b""
             if status in soft:
-                return status, body
+                return status, resp
             if status == 200:
-                return status, body
+                return status, resp
             if status in (401, 403):
                 raise AuthError(
                     "GFG returned HTTP %d. Your login cookies have probably "
@@ -208,8 +218,11 @@ def load_endpoints(root, env):
         cfg = json.loads(raw)
     except ValueError as exc:
         raise ConfigError("endpoints config is not valid JSON: %s" % exc)
-    for key in ("list_url", "items_path", "fields", "accepted_field",
-                "accepted_values", "code_url", "code_path"):
+    two_stage = bool(cfg.get("profile_url"))
+    required = ["items_path", "fields", "accepted_field", "accepted_values",
+                "code_url", "code_path"]
+    required += ["problem_list_url", "profile_items_path"] if two_stage else ["list_url"]
+    for key in required:
         if key not in cfg:
             raise ConfigError("endpoints config is missing '%s'." % key)
     for key in ("id", "problem_slug", "language", "timestamp"):
@@ -231,8 +244,12 @@ def truthy(value, default):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-def parse_ts(value):
-    """Return epoch seconds (float) or None."""
+def parse_ts(value, naive_offset_minutes=0):
+    """Return epoch seconds (float) or None.
+
+    Strings without a timezone are read as UTC plus ``naive_offset_minutes``
+    (e.g. 330 for IST).
+    """
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)) or (
@@ -247,7 +264,7 @@ def parse_ts(value):
         except ValueError:
             return None
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=timezone(timedelta(minutes=naive_offset_minutes)))
         return dt.timestamp()
     return None
 
@@ -447,14 +464,73 @@ def normalize(item, cfg):
         "difficulty": g("difficulty"),
         "language": str(g("language") or "").strip(),
         "raw_ts": raw_ts,
-        "epoch": parse_ts(raw_ts),
+        "epoch": parse_ts(raw_ts, int(cfg.get("timestamp_utc_offset_minutes") or 0)),
         "problem_id": g("problem_id"),
         "topics": [str(t) for t in topics],
         "accepted": str(status).lower() in accepted_values,
     }
 
 
+def list_two_stage(client, cfg):
+    """GFG flow: profile request lists solved problems, then one request per
+    problem lists that problem's submissions (with submission ids)."""
+    method = (cfg.get("profile_method") or "POST").upper()
+    body = cfg.get("profile_body") if method == "POST" else None
+    _, raw = client.get(cfg["profile_url"], body=body if body is not None else ({} if method == "POST" else None))
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise SyncError("Profile response was not JSON.")
+    tree = dig(data, cfg["profile_items_path"])
+    if not isinstance(tree, dict):
+        raise SyncError("Profile response has no object at '%s'. Check "
+                        "profile_items_path in endpoints.json."
+                        % cfg["profile_items_path"])
+    problems = []
+    for difficulty, group in tree.items():
+        if not isinstance(group, dict):
+            continue
+        for pid, info in group.items():
+            if isinstance(info, dict) and info.get("slug"):
+                problems.append((difficulty, pid, info))
+    log("Profile lists %d solved problem(s)." % len(problems))
+    records, seen = [], set()
+    for difficulty, pid, info in sorted(problems, key=lambda t: t[2]["slug"]):
+        slug = info["slug"]
+        url = cfg["problem_list_url"].replace("{slug}", urllib.parse.quote(slug, safe=""))
+        status, raw = client.get(url, soft=(404,))
+        if status != 200:
+            log("Skipping %s (HTTP %d)." % (slug, status))
+            continue
+        try:
+            sub = json.loads(raw)
+        except ValueError:
+            raise SyncError("Submission list for %s was not JSON." % slug)
+        items = dig(sub, cfg["items_path"])
+        if not isinstance(items, list):
+            raise SyncError("Submission list for %s has no list at '%s'. "
+                            "Check items_path in endpoints.json."
+                            % (slug, cfg["items_path"]))
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item = dict(item)
+            item["_slug"] = slug
+            item["_title"] = info.get("pname")
+            item["_difficulty"] = difficulty
+            item["_problem_id"] = pid
+            rec = normalize(item, cfg)
+            if rec is None or rec["id"] in seen:
+                continue
+            seen.add(rec["id"])
+            records.append(rec)
+    return records
+
+
 def list_submissions(client, cfg, last_id, full):
+    if cfg.get("profile_url"):
+        # Every run re-lists all problems; already-synced ids are skipped later.
+        return list_two_stage(client, cfg)
     records = []
     seen_ids = set()
     page = cfg["page_start"]
